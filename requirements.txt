@@ -1,0 +1,7 @@
+fastapi==0.115.8
+uvicorn[standard]==0.34.0
+opencv-python==4.11.0.86
+numpy==2.2.2
+requests==2.32.3
+pyserial==3.5
+python-dotenv==1.0.1
