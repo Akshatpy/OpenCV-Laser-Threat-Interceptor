@@ -8,6 +8,8 @@ This project provides a FastAPI server for a simple prototype defense demo:
 - prints threat coordinates to the console
 - exposes a live MJPEG feed and JSON status endpoints
 
+[Screenshot](images/circuit.png)
+[Screenshot](images/workingimg.png)
 ## Setup
 
 1. Install dependencies:
