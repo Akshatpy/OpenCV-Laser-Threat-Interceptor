@@ -1,22 +1,34 @@
 #include <Servo.h>
 
-// Wire signal to D9, power servo from an external 5V supply.
-const int SERVO_PIN = 9;
+// Pan on D9 and optional tilt on D10. Power servos from an external 5V supply.
+const int PAN_SERVO_PIN = 9;
+const int TILT_SERVO_PIN = 10;
 const int THREAT_OUTPUT_PIN = 7;
 const bool THREAT_OUTPUT_ACTIVE_HIGH = true;
-const int MIN_ANGLE = 20;
-const int MAX_ANGLE = 160;
-const int HOME_ANGLE = 90;
+const int PAN_MIN_ANGLE = 20;
+const int PAN_MAX_ANGLE = 160;
+const int PAN_HOME_ANGLE = 90;
+const int TILT_MIN_ANGLE = 20;
+const int TILT_MAX_ANGLE = 160;
+const int TILT_HOME_ANGLE = 90;
 
 Servo panServo;
-int currentAngle = HOME_ANGLE;
+Servo tiltServo;
+int currentPanAngle = PAN_HOME_ANGLE;
+int currentTiltAngle = TILT_HOME_ANGLE;
 bool threatOutputState = false;
 String inputLine;
 
-void applyAngle(int angle) {
-  angle = constrain(angle, MIN_ANGLE, MAX_ANGLE);
-  currentAngle = angle;
-  panServo.write(currentAngle);
+void applyPanAngle(int angle) {
+  angle = constrain(angle, PAN_MIN_ANGLE, PAN_MAX_ANGLE);
+  currentPanAngle = angle;
+  panServo.write(currentPanAngle);
+}
+
+void applyTiltAngle(int angle) {
+  angle = constrain(angle, TILT_MIN_ANGLE, TILT_MAX_ANGLE);
+  currentTiltAngle = angle;
+  tiltServo.write(currentTiltAngle);
 }
 
 void applyThreatOutput(bool active) {
@@ -29,8 +41,10 @@ void setup() {
   Serial.begin(115200);
   pinMode(THREAT_OUTPUT_PIN, OUTPUT);
   applyThreatOutput(false);
-  panServo.attach(SERVO_PIN);
-  applyAngle(HOME_ANGLE);
+  panServo.attach(PAN_SERVO_PIN);
+  tiltServo.attach(TILT_SERVO_PIN);
+  applyPanAngle(PAN_HOME_ANGLE);
+  applyTiltAngle(TILT_HOME_ANGLE);
   Serial.println("UNO servo tracker ready");
 }
 
@@ -53,14 +67,23 @@ void handleLine(const String &line) {
 
   if (line.startsWith("PAN:")) {
     int angle = line.substring(4).toInt();
-    applyAngle(angle);
+    applyPanAngle(angle);
     Serial.print("OK PAN=");
-    Serial.println(currentAngle);
+    Serial.println(currentPanAngle);
+    return;
+  }
+
+  if (line.startsWith("TILT:")) {
+    int angle = line.substring(5).toInt();
+    applyTiltAngle(angle);
+    Serial.print("OK TILT=");
+    Serial.println(currentTiltAngle);
     return;
   }
 
   if (line == "HOME") {
-    applyAngle(HOME_ANGLE);
+    applyPanAngle(PAN_HOME_ANGLE);
+    applyTiltAngle(TILT_HOME_ANGLE);
     Serial.println("OK HOME");
     return;
   }

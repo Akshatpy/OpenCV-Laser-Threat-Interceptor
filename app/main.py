@@ -41,15 +41,30 @@ class ServoBridge:
         self.enabled = os.getenv("SERVO_ENABLED", "0") == "1"
         self.port = os.getenv("SERVO_SERIAL_PORT", "COM5")
         self.baud = int(os.getenv("SERVO_BAUD", "115200"))
+        self.pan_tilt_enabled = os.getenv("SERVO_PAN_TILT_ENABLED", "0") == "1"
+
         self.min_angle = int(os.getenv("SERVO_MIN_ANGLE", "20"))
         self.max_angle = int(os.getenv("SERVO_MAX_ANGLE", "160"))
         self.deadband = float(os.getenv("SERVO_DEADBAND", "0.05"))
         self.deadband_px = int(os.getenv("SERVO_DEADBAND_PX", "0"))
         self.kp = float(os.getenv("SERVO_KP", "25.0"))
         self.current_pan = float(os.getenv("SERVO_START_PAN", "90"))
+
+        self.tilt_kp = float(os.getenv("SERVO_TILT_KP", "22.0"))
+        self.tilt_deadband = float(os.getenv("SERVO_TILT_DEADBAND", str(self.deadband)))
+        self.tilt_deadband_px = int(os.getenv("SERVO_TILT_DEADBAND_PX", "0"))
+        self.tilt_min_angle = int(os.getenv("SERVO_TILT_MIN_ANGLE", "20"))
+        self.tilt_max_angle = int(os.getenv("SERVO_TILT_MAX_ANGLE", "160"))
+        self.current_tilt = float(os.getenv("SERVO_START_TILT", "90"))
+        self.tilt_invert = os.getenv("SERVO_TILT_INVERT", "1") == "1"
+
         self.last_sent_angle: Optional[int] = None
         self.last_sent_at = 0.0
         self.min_send_interval = float(os.getenv("SERVO_MIN_SEND_INTERVAL", "0.04"))
+        self.last_sent_tilt: Optional[int] = None
+        self.last_sent_tilt_at = 0.0
+        self.min_send_interval_tilt = float(os.getenv("SERVO_TILT_MIN_SEND_INTERVAL", "0.04"))
+
         self.threat_output_enabled = os.getenv("THREAT_OUTPUT_ENABLED", "0") == "1"
         self.threat_output_mode = os.getenv("THREAT_OUTPUT_MODE", "LASER").strip().upper()
         if self.threat_output_mode not in {"LASER", "LED"}:
@@ -85,28 +100,83 @@ class ServoBridge:
                 pass
             self.serial_conn = None
 
-    def update_from_detection(self, center_x: int, frame_width: int) -> Optional[int]:
-        if frame_width <= 0:
+    def update_from_detection(
+        self, center_x: int, center_y: int, frame_width: int, frame_height: int
+    ) -> tuple[Optional[int], Optional[int]]:
+        pan_result = self._compute_axis_angle(
+            center=center_x,
+            frame_size=frame_width,
+            current_value=self.current_pan,
+            kp=self.kp,
+            deadband=self.deadband,
+            deadband_px=self.deadband_px,
+            min_angle=self.min_angle,
+            max_angle=self.max_angle,
+            invert=False,
+        )
+        sent_pan: Optional[int] = None
+        if pan_result is not None:
+            pan_angle, next_pan = pan_result
+            self.current_pan = next_pan
+            if self._send_angle(pan_angle):
+                sent_pan = pan_angle
+
+        sent_tilt: Optional[int] = None
+        if self.pan_tilt_enabled:
+            tilt_result = self._compute_axis_angle(
+                center=center_y,
+                frame_size=frame_height,
+                current_value=self.current_tilt,
+                kp=self.tilt_kp,
+                deadband=self.tilt_deadband,
+                deadband_px=self.tilt_deadband_px,
+                min_angle=self.tilt_min_angle,
+                max_angle=self.tilt_max_angle,
+                invert=self.tilt_invert,
+            )
+            if tilt_result is not None:
+                tilt_angle, next_tilt = tilt_result
+                self.current_tilt = next_tilt
+                if self._send_tilt(tilt_angle):
+                    sent_tilt = tilt_angle
+
+        return sent_pan, sent_tilt
+
+    def _compute_axis_angle(
+        self,
+        *,
+        center: int,
+        frame_size: int,
+        current_value: float,
+        kp: float,
+        deadband: float,
+        deadband_px: int,
+        min_angle: int,
+        max_angle: int,
+        invert: bool,
+    ) -> Optional[tuple[int, float]]:
+        if frame_size <= 0:
             return None
-        offset_px = center_x - frame_width / 2.0
-        if self.deadband_px > 0:
-            if abs(offset_px) < self.deadband_px:
-                return None
-        else:
-            deadband_px = self.deadband * max(frame_width / 2.0, 1.0)
+
+        half = max(frame_size / 2.0, 1.0)
+        offset_px = center - half
+        if deadband_px > 0:
             if abs(offset_px) < deadband_px:
                 return None
+        else:
+            if abs(offset_px) < (deadband * half):
+                return None
 
-        error_x = offset_px / max(frame_width / 2.0, 1.0)
-        if abs(error_x) < 1e-6:
+        error = offset_px / half
+        if invert:
+            error = -error
+        if abs(error) < 1e-6:
             return None
 
-        target = self.current_pan + (self.kp * error_x)
-        self.current_pan = max(self.min_angle, min(self.max_angle, target))
-        angle = int(round(self.current_pan))
-        if self._send_angle(angle):
-            return angle
-        return None
+        target = current_value + (kp * error)
+        clamped = max(min_angle, min(max_angle, target))
+        angle = int(round(clamped))
+        return angle, clamped
 
     def _send_angle(self, angle: int) -> bool:
         now = time.time()
@@ -127,6 +197,28 @@ class ServoBridge:
         except Exception as exc:
             print(f"Servo write failed: {exc}", flush=True)
             # Fail-open: disable serial writes so vision loop cannot freeze on repeated IO errors.
+            self.enabled = False
+            self.close()
+            return False
+
+    def _send_tilt(self, angle: int) -> bool:
+        now = time.time()
+        if now - self.last_sent_tilt_at < self.min_send_interval_tilt:
+            return False
+        if self.last_sent_tilt is not None and abs(self.last_sent_tilt - angle) < 1:
+            return False
+
+        if not self.enabled or self.serial_conn is None:
+            return False
+
+        self.last_sent_tilt = angle
+        self.last_sent_tilt_at = now
+
+        try:
+            self._write_line(f"TILT:{angle}")
+            return True
+        except Exception as exc:
+            print(f"Servo write failed: {exc}", flush=True)
             self.enabled = False
             self.close()
             return False
@@ -176,7 +268,15 @@ class ServoBridge:
 class CameraProcessor:
     def __init__(self, source_url: str) -> None:
         self.source_url = source_url
-        self.candidate_urls = self._build_candidate_urls(source_url)
+        self.camera_source_mode = os.getenv("CAMERA_SOURCE_MODE", "esp32").strip().lower()
+        if self.camera_source_mode not in {"esp32", "laptop"}:
+            self.camera_source_mode = "esp32"
+        try:
+            self.laptop_camera_index = int(os.getenv("LAPTOP_CAMERA_INDEX", "0"))
+        except ValueError:
+            self.laptop_camera_index = 0
+
+        self.candidate_urls = self._build_candidate_urls(source_url) if self.camera_source_mode == "esp32" else []
         self.capture: Optional[cv2.VideoCapture] = None
         self.stream_response: Optional[requests.Response] = None
         self.stream_mode: Optional[str] = None  # "opencv" or "mjpeg_manual"
@@ -214,6 +314,22 @@ class CameraProcessor:
         self.servo.close()
 
     def _open_capture(self) -> Optional[cv2.VideoCapture]:
+        if self.camera_source_mode == "laptop":
+            print(f"Trying laptop camera index {self.laptop_camera_index}", flush=True)
+            capture = cv2.VideoCapture(self.laptop_camera_index, cv2.CAP_DSHOW)
+            if not capture.isOpened():
+                capture.release()
+                capture = cv2.VideoCapture(self.laptop_camera_index)
+
+            if capture.isOpened():
+                self.stream_mode = "opencv_laptop"
+                print(f"✓ Connected to laptop camera index {self.laptop_camera_index}", flush=True)
+                return capture
+
+            print(f"✗ Failed to open laptop camera index {self.laptop_camera_index}", flush=True)
+            capture.release()
+            return None
+
         for candidate_url in self.candidate_urls:
             try:
                 print(f"Trying stream URL (requests): {candidate_url}", flush=True)
@@ -484,9 +600,11 @@ class CameraProcessor:
         return overlay
 
     def _mock_servo_target(self, center_x: int, center_y: int, frame_width: int, frame_height: int) -> None:
-        servo_angle = self.servo.update_from_detection(center_x, frame_width)
-        if servo_angle is not None:
-            print(f"ARDUINO PAN={servo_angle}", flush=True)
+        pan_angle, tilt_angle = self.servo.update_from_detection(center_x, center_y, frame_width, frame_height)
+        if pan_angle is not None:
+            print(f"ARDUINO PAN={pan_angle}", flush=True)
+        if tilt_angle is not None:
+            print(f"ARDUINO TILT={tilt_angle}", flush=True)
 
     def _read_mjpeg_frame(self, response: requests.Response) -> Optional[np.ndarray]:
         """Read one JPEG frame from an MJPEG stream response."""
@@ -620,10 +738,14 @@ def health() -> JSONResponse:
     return JSONResponse(
         {
             "ok": True,
+            "camera_source_mode": camera.camera_source_mode,
+            "laptop_camera_index": camera.laptop_camera_index,
             "camera_url": ESP32_CAM_URL,
             "servo_enabled": camera.servo.enabled,
+            "servo_pan_tilt_enabled": camera.servo.pan_tilt_enabled,
             "servo_port": camera.servo.port,
             "servo_pan": int(round(camera.servo.current_pan)),
+            "servo_tilt": int(round(camera.servo.current_tilt)),
             "threat_output_enabled": camera.servo.threat_output_enabled,
             "threat_output_mode": camera.servo.threat_output_mode,
             "threat_output_active": bool(camera.servo.threat_output_state),
